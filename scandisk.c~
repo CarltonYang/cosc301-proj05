@@ -13,37 +13,136 @@
 #include "direntry.h"
 #include "fat.h"
 #include "dos.h"
-struct File{
+#define TOTAL_CLUSTERS(bpb) (bpb->bpbSectors / bpb->bpbSecPerClust)
+#define CLUSTER_SIZE(bpb) (bpb->bpbSecPerClust * bpb->bpbBytesPerSec)
+typedef struct node{
 	uint16_t cluster;
 	struct node *next;
-}; 
+} File; 
+void File_add(uint16_t cluster, File **file_list);
+void filelist_clear( File *file_list);
+int check_cluster(uint16_t cluster, File *headoflist);
+uint16_t get_dirent(struct direntry *dirent, char *buffer);
+void write_dirent(struct direntry *dirent, char *filename, 
+		  uint16_t start_cluster, uint32_t size);
+void usage(char *progname) {
+    fprintf(stderr, "usage: %s <imagename>\n", progname);
+    exit(1);
+}
+void create_dirent(struct direntry *dirent, char *filename, 
+		   uint16_t start_cluster, uint32_t size,
+		   uint8_t *image_buf, struct bpb33* bpb);
 
-void File_add(uint16_t cluster, struct File **file_list) {
+
+void follow_dir(uint16_t cluster, int indent,
+		uint8_t *image_buf, struct bpb33* bpb, File **filelist)
+{
+    while (is_valid_cluster(cluster, bpb))
+    {
+        struct direntry *dirent = (struct direntry*)cluster_to_addr(cluster, image_buf, bpb);
+	char buffer[MAXFILENAME];
+        int numDirEntries = (bpb->bpbBytesPerSec * bpb->bpbSecPerClust) / sizeof(struct direntry);
+        int i = 0;
+	for ( ; i < numDirEntries; i++)
+	{
+            
+            uint16_t followclust = get_dirent(dirent, buffer);
+            if (followclust)
+                follow_dir(followclust, indent+1, image_buf, bpb, filelist);
+            dirent++;
+	}
+	cluster = get_fat_entry(cluster, image_buf, bpb);
+    }
+}
+
+int cluster_size(struct direntry *dirent, uint8_t *image_buf, struct bpb33 *bpb, File **filelist){
+    return 1;
+}
+
+int fix_inconsistency(struct direntry* dirent,uint8_t *image_buf,
+		      char* filename, struct bpb33* bpb, File **filelist ){
+	uint32_t size_to_dirent = getulong(dirent->deFileSize);// find the file size according to directory entry
+	int size_to_cluster = cluster_size(dirent, image_buf,bpb, filelist);//find the file size according to clusters
+	
+	return 1;
+}
+
+void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
+{
+    File* filelist=NULL;
+    uint16_t cluster = 0;
+    struct direntry *dirent = (struct direntry*)cluster_to_addr(cluster, image_buf, bpb);
+    char buffer[MAXFILENAME];
+    int i = 0;
+    for ( ; i < bpb->bpbRootDirEnts; i++)
+    {
+        uint16_t followclust = get_dirent(dirent, buffer);
+	
+	fix_inconsistency(dirent,  image_buf,buffer, bpb, &filelist);
+	File_add(followclust, &filelist);
+        if (is_valid_cluster(followclust, bpb)) {
+            File_add(followclust, &filelist);
+            follow_dir(followclust, 1, image_buf, bpb, &filelist);
+        }
+        dirent++;
+    }
+
+
+
+}
+
+
+int main(int argc, char** argv) {
+    uint8_t *image_buf;
+    int fd;
+    struct bpb33* bpb;
+    if (argc < 2) {
+	usage(argv[0]);
+    }
+
+    image_buf = mmap_file(argv[1], &fd);
+    bpb = check_bootsector(image_buf);
+
+    // your code should start here...
+
+    traverse_root(image_buf, bpb);
+
+
+
+    unmmap_file(image_buf, &fd);
+    return 0;
+}
+
+
+
+
+
+
+
+
+
+
+//Linked list functions
+void File_add(uint16_t cluster, File **file_list) {
 	//malloc
-    struct File *new_file = (struct File *)malloc(sizeof(struct File));
+     File *new_file = (File *)malloc(sizeof(File));
 	//update variables
     new_file->cluster=cluster;
     new_file->next = *file_list;
     *file_list = new_file;
 }
 
-
-
-//free the process list from heap
-void filelist_clear(struct File *file_list) {
+void filelist_clear( File *file_list) {
     while (file_list != NULL) {
-        struct File *tmp = file_list;
+         File *tmp = file_list;
         file_list = file_list->next;
         free(tmp);
     }
 }
 
-
-
-//check argument pid is valid or not
-int check_cluster(uint16_t cluster, struct File *headoflist)
+int check_cluster(uint16_t cluster, File *headoflist)
 {
-    struct File *current = headoflist;
+    File *current = headoflist;
     while (current != NULL) {
         if (cluster == current->cluster) {
             return 1;
@@ -53,10 +152,6 @@ int check_cluster(uint16_t cluster, struct File *headoflist)
     return 0;
 }
 
-void usage(char *progname) {
-    fprintf(stderr, "usage: %s <imagename>\n", progname);
-    exit(1);
-}
 
 // functions for inconsistency problems
 uint16_t get_dirent(struct direntry *dirent, char *buffer)
@@ -203,10 +298,8 @@ void write_dirent(struct direntry *dirent, char *filename,
        cared... */
 }
 
-
 /* create_dirent finds a free slot in the directory, and write the
    directory entry */
-
 void create_dirent(struct direntry *dirent, char *filename, 
 		   uint16_t start_cluster, uint32_t size,
 		   uint8_t *image_buf, struct bpb33* bpb)
@@ -234,66 +327,4 @@ void create_dirent(struct direntry *dirent, char *filename,
 	}
 	dirent++;
     }
-}
-
-void follow_dir(uint16_t cluster, int indent,
-		uint8_t *image_buf, struct bpb33* bpb)
-{
-    while (is_valid_cluster(cluster, bpb))
-    {
-        struct direntry *dirent = (struct direntry*)cluster_to_addr(cluster, image_buf, bpb);
-
-        int numDirEntries = (bpb->bpbBytesPerSec * bpb->bpbSecPerClust) / sizeof(struct direntry);
-        int i = 0;
-	for ( ; i < numDirEntries; i++)
-	{
-            
-            uint16_t followclust = print_dirent(dirent, indent);
-            if (followclust)
-                follow_dir(followclust, indent+1, image_buf, bpb);
-            dirent++;
-	}
-
-	cluster = get_fat_entry(cluster, image_buf, bpb);
-    }
-}
-
-int cluster_size(){
-
-}
-
-int fix_inconsistency()
-
-void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
-{
-    struct File filelist=NULL;
-    uint16_t cluster = 0;
-    struct direntry *dirent = (struct direntry*)cluster_to_addr(cluster, image_buf, bpb);
-    
-    
-
-
-
-}
-
-
-int main(int argc, char** argv) {
-    uint8_t *image_buf;
-    int fd;
-    struct bpb33* bpb;
-    if (argc < 2) {
-	usage(argv[0]);
-    }
-
-    image_buf = mmap_file(argv[1], &fd);
-    bpb = check_bootsector(image_buf);
-
-    // your code should start here...
-
-    traverse_root(image_buf, bpb);
-
-
-
-    unmmap_file(image_buf, &fd);
-    return 0;
 }
