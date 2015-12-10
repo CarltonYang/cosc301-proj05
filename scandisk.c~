@@ -7,7 +7,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <string.h>
-
+#include <assert.h>
+#include <ctype.h>
 #include "bootsect.h"
 #include "bpb.h"
 #include "direntry.h"
@@ -18,10 +19,12 @@
 typedef struct node{
 	uint16_t cluster;
 	struct node *next;
-} File; 
-void File_add(uint16_t cluster, File **file_list);
-void filelist_clear( File *file_list);
-int check_cluster(uint16_t cluster, File *headoflist);
+} Node; 
+void cluster_add(uint16_t cluster, Node **clusterlist);
+void clusterlist_clear( Node *file_list);
+int check_cluster(uint16_t cluster, Node *headoflist);
+int fix_inconsistency(struct direntry* dirent,uint8_t *image_buf,
+		      char* filename, struct bpb33* bpb, Node **clusterlist );
 uint16_t get_dirent(struct direntry *dirent, char *buffer);
 void write_dirent(struct direntry *dirent, char *filename, 
 		  uint16_t start_cluster, uint32_t size);
@@ -33,43 +36,117 @@ void create_dirent(struct direntry *dirent, char *filename,
 		   uint16_t start_cluster, uint32_t size,
 		   uint8_t *image_buf, struct bpb33* bpb);
 
+void free_cluster(struct direntry *dirent, uint8_t *image_buf, struct bpb33* bpb, int size_by_dirent){
+    uint16_t cluster = getushort(dirent->deStartCluster);
+    uint16_t cluster_size = bpb->bpbBytesPerSec * bpb->bpbSecPerClust;
+
+    uint16_t byte_count = 0;
+    uint16_t prev_cluster = cluster;
+
+    while (byte_count < size_by_dirent) {
+        byte_count += cluster_size;
+        prev_cluster = cluster;
+        cluster = get_fat_entry(cluster, image_buf, bpb);
+    }
+    if (byte_count != 0) {
+        set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
+    }
+    // marking the other clusters pointed to by the FAT chain as free
+    while (!is_end_of_file(cluster)) {
+        
+        uint16_t oldcluster = cluster;
+        cluster = get_fat_entry(cluster, image_buf, bpb);
+
+        set_fat_entry(oldcluster, FAT12_MASK & CLUST_FREE, image_buf, bpb);
+    }
+}
 
 void follow_dir(uint16_t cluster, int indent,
-		uint8_t *image_buf, struct bpb33* bpb, File **filelist)
+		uint8_t *image_buf, struct bpb33* bpb, Node **clusterlist)
 {
     while (is_valid_cluster(cluster, bpb))
     {
+	cluster_add(cluster,clusterlist);
         struct direntry *dirent = (struct direntry*)cluster_to_addr(cluster, image_buf, bpb);
 	char buffer[MAXFILENAME];
+	
         int numDirEntries = (bpb->bpbBytesPerSec * bpb->bpbSecPerClust) / sizeof(struct direntry);
         int i = 0;
 	for ( ; i < numDirEntries; i++)
-	{
-            
+
+            cluster_add(cluster,clusterlist);
             uint16_t followclust = get_dirent(dirent, buffer);
+	    fix_inconsistency(dirent, image_buf, buffer, bpb, clusterlist);
             if (followclust)
-                follow_dir(followclust, indent+1, image_buf, bpb, filelist);
+                {follow_dir(followclust, indent+1, image_buf, bpb, clusterlist);}
             dirent++;
-	}
+	
 	cluster = get_fat_entry(cluster, image_buf, bpb);
     }
 }
 
-int cluster_size(struct direntry *dirent, uint8_t *image_buf, struct bpb33 *bpb, File **filelist){
-    return 1;
+int cluster_size(struct direntry *dirent, uint8_t *image_buf, struct bpb33 *bpb, Node **cluster_list){
+    uint16_t cluster = getushort(dirent->deStartCluster);
+    uint16_t cluster_size = bpb->bpbBytesPerSec * bpb->bpbSecPerClust;
+
+    int byte_count = 0;
+    cluster_add(cluster, cluster_list);
+    uint16_t prev_cluster = cluster;
+    if (is_end_of_file(cluster)) {
+        byte_count = 512;
+    }
+    while (!is_end_of_file(cluster) && cluster < 2849) {   
+
+        if (cluster == (FAT12_MASK & CLUST_BAD)) {
+            printf("Bad cluster: cluster number %d \n", cluster);
+            set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
+            break;
+        }
+
+        if (cluster == (FAT12_MASK & CLUST_FREE)) {
+            //printf("Free cluster in chain: cluster number %d \n", cluster); 
+            set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
+            break;   
+        }
+
+        byte_count += cluster_size;
+        prev_cluster = cluster;
+        cluster = get_fat_entry(cluster, image_buf, bpb);
+        
+        if (prev_cluster == cluster) {
+            printf("Cluster refers to itself! Setting it as end of file. \n");
+            set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
+            break;   
+        }
+
+        cluster_add(cluster, cluster_list);
+    }
+
+    return byte_count;
 }
 
 int fix_inconsistency(struct direntry* dirent,uint8_t *image_buf,
-		      char* filename, struct bpb33* bpb, File **filelist ){
-	uint32_t size_to_dirent = getulong(dirent->deFileSize);// find the file size according to directory entry
-	int size_to_cluster = cluster_size(dirent, image_buf,bpb, filelist);//find the file size according to clusters
+		      char* filename, struct bpb33* bpb, Node **clusterlist ){
+	uint32_t size_by_dirent = getulong(dirent->deFileSize);// find the file size according to directory entry
+	int size_by_cluster = cluster_size(dirent, image_buf,bpb, clusterlist);//find the file size according to clusters
 	
+        if (size_by_cluster != 0 && size_by_dirent < size_by_cluster - 512 ) { // fix the FAT
+            printf("Inconsistent file: %s (size in dir entry: %d, size in FAT chain: %d) \n", filename, size_by_dirent, size_by_cluster);
+            free_cluster(dirent, image_buf, bpb, size_by_dirent);
+           
+        }
+
+        else if (size_by_dirent > size_by_cluster) { //fix the dir entry
+            printf("Inconsistent file: %s (size in dir entry: %d, size in FAT chain: %d) \n", filename, size_by_dirent, size_by_cluster);
+            putulong(dirent->deFileSize, size_by_cluster);
+           
+        }
 	return 1;
 }
 
 void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
 {
-    File* filelist=NULL;
+    Node* newlist=NULL;
     uint16_t cluster = 0;
     struct direntry *dirent = (struct direntry*)cluster_to_addr(cluster, image_buf, bpb);
     char buffer[MAXFILENAME];
@@ -77,12 +154,12 @@ void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
     for ( ; i < bpb->bpbRootDirEnts; i++)
     {
         uint16_t followclust = get_dirent(dirent, buffer);
-	
-	fix_inconsistency(dirent,  image_buf,buffer, bpb, &filelist);
-	File_add(followclust, &filelist);
+	if (dirent->deAttributes == ATTR_NORMAL) {
+	    fix_inconsistency(dirent,  image_buf,buffer, bpb, &newlist);}
+	cluster_add(followclust, &newlist);
         if (is_valid_cluster(followclust, bpb)) {
-            File_add(followclust, &filelist);
-            follow_dir(followclust, 1, image_buf, bpb, &filelist);
+            cluster_add(followclust, &newlist);
+            follow_dir(followclust, 1, image_buf, bpb, &newlist);
         }
         dirent++;
     }
@@ -123,26 +200,36 @@ int main(int argc, char** argv) {
 
 
 //Linked list functions
-void File_add(uint16_t cluster, File **file_list) {
-	//malloc
-     File *new_file = (File *)malloc(sizeof(File));
-	//update variables
-    new_file->cluster=cluster;
-    new_file->next = *file_list;
-    *file_list = new_file;
+void cluster_add(uint16_t cluster, Node **file_list) {
+    if (check_cluster(cluster, *file_list)) { // add smartly, don't add if it's already there.
+        return;
+    }
+    Node *newnode= malloc(sizeof(Node));
+    newnode->cluster = cluster;
+    newnode->next = NULL;
+    Node *curr = *file_list;
+    if (curr == NULL) {
+        *file_list = newnode;
+        return;
+    }
+    while (curr->next != NULL) {
+        curr = curr->next;
+    }
+    curr->next = newnode;
+    newnode->next = NULL;
 }
 
-void filelist_clear( File *file_list) {
+void clusterlist_clear( Node *file_list) {
     while (file_list != NULL) {
-         File *tmp = file_list;
+         Node *tmp = file_list;
         file_list = file_list->next;
         free(tmp);
     }
 }
 
-int check_cluster(uint16_t cluster, File *headoflist)
+int check_cluster(uint16_t cluster, Node *headoflist)
 {
-    File *current = headoflist;
+    Node *current = headoflist;
     while (current != NULL) {
         if (cluster == current->cluster) {
             return 1;
