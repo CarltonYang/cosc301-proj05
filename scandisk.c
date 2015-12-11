@@ -15,7 +15,6 @@
 #include "fat.h"
 #include "dos.h"
 
-//#define TOTAL_CLUSTERS_bpb (bpb->bpbSectors / bpb->bpbSecPerClust)
 #define CLUSTER_SIZE_bpb (bpb->bpbSecPerClust * bpb->bpbBytesPerSec)
 
 //prototypes for functions from dos_ls/dos_cat/dot_cp and linked list;
@@ -69,7 +68,7 @@ void free_cluster(struct direntry *dirent, uint8_t *image_buf, struct bpb33 *bpb
     if (byte_count != 0) {
         set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
     }
-    // marking the other clusters pointed to by the FAT chain as free
+    // mark the rest of clusters pointed by the FAT chain as free
     while (!is_end_of_file(cluster)) {
         uint16_t oldcluster = cluster;
         cluster = get_fat_entry(cluster, image_buf, bpb);
@@ -90,13 +89,12 @@ int fix_in(struct direntry* dirent, char* filename, uint8_t *image_buf,
     }
     while (!is_end_of_file(cluster) && cluster ){ 
         if (cluster == (FAT12_MASK & CLUST_BAD)) {
-            printf("Bad cluster: cluster number %d \n", cluster);
+            printf("Bad cluster number %d \n", cluster);
             set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
             break;
         }
 
         if (cluster == (FAT12_MASK & CLUST_FREE)) {
-            //printf("Free cluster in chain: cluster number %d \n", cluster); 
             set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
             break;   
         }
@@ -106,7 +104,7 @@ int fix_in(struct direntry* dirent, char* filename, uint8_t *image_buf,
         cluster = get_fat_entry(cluster, image_buf, bpb);
         
         if (prev_cluster == cluster) {
-            printf("Cluster refers to itself! Setting it as end of file. \n");
+            printf("Cluster refers to itself! Now set it as end of file. \n");
             set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
             break;   
         }
@@ -118,15 +116,16 @@ int fix_in(struct direntry* dirent, char* filename, uint8_t *image_buf,
     uint32_t size_in_dirent = getulong(dirent->deFileSize);
     //printf("size in dirent: %d\n", size_in_dirent);
     //printf("size in cluster: %d\n", size_in_clusters);
-    if (size_in_clusters != 0 && size_in_dirent < size_in_clusters - 512 ) { // believe the dir entry; fix the FAT
+    //fix inconsistency in FAT
+    if (size_in_clusters != 0 && size_in_dirent < size_in_clusters - 512 ) { 
         is_inconsist = 1;
 	printf("Find inconsistency in file: %s. Size in FAT is bigger by more than 512 bytes.\n", filename);
 	printf("Size according to directory entry: %d\n",size_in_dirent);
 	printf("Size according to FAT chain: %d\n",size_in_clusters);
         free_cluster(dirent, image_buf, bpb, size_in_dirent);
     }
-
-    else if (size_in_dirent > size_in_clusters) { // believe the FAT chain, fix the dir entry
+    //fix the size entry
+    else if (size_in_dirent > size_in_clusters) { 
 	is_inconsist = 1;	
 	printf("Find inconsistency in file: %s. Size is bigger in directory entry.\n", filename);
 	printf("Size according to directory entry: %d\n",size_in_dirent);
