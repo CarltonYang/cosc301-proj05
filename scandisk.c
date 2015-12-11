@@ -40,11 +40,6 @@ void write_dirent(struct direntry *dirent, char *filename,
 int follow_dir(uint16_t cluster, int indent,
                uint8_t *image_buf, struct bpb33* bpb, Node** cluster_list);
 
-void usage(char *progname) {
-    fprintf(stderr, "usage: %s <imagename>\n", progname);
-    exit(1);
-}
-
 void create_dirent(struct direntry *dirent, char *filename, 
 		   uint16_t start_cluster, uint32_t size,
 		   uint8_t *image_buf, struct bpb33* bpb);
@@ -79,7 +74,7 @@ void free_cluster(struct direntry *dirent, uint8_t *image_buf, struct bpb33 *bpb
 
 int fix_in(struct direntry* dirent, char* filename, uint8_t *image_buf,
            struct bpb33* bpb, Node **cluster_list) 
-{
+{//fix inconsitencies with cluster size in FAT compared to directory entry 
     uint16_t cluster = getushort(dirent->deStartCluster);
     int size_in_clusters = 0;
     cluster_add(cluster, cluster_list);
@@ -89,7 +84,7 @@ int fix_in(struct direntry* dirent, char* filename, uint8_t *image_buf,
     }
     while (!is_end_of_file(cluster) && cluster ){ 
         if (cluster == (FAT12_MASK & CLUST_BAD)) {
-            printf("Bad cluster number %d \n", cluster);
+            printf("Bad cluster found in number %d \n", cluster);
             set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
             break;
         }
@@ -104,7 +99,7 @@ int fix_in(struct direntry* dirent, char* filename, uint8_t *image_buf,
         cluster = get_fat_entry(cluster, image_buf, bpb);
         
         if (prev_cluster == cluster) {
-            printf("Cluster refers to itself! Now set it as end of file. \n");
+            printf("Self referring cluster found. Now set it as end of file. \n");
             set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
             break;   
         }
@@ -116,6 +111,7 @@ int fix_in(struct direntry* dirent, char* filename, uint8_t *image_buf,
     uint32_t size_in_dirent = getulong(dirent->deFileSize);
     //printf("size in dirent: %d\n", size_in_dirent);
     //printf("size in cluster: %d\n", size_in_clusters);
+
     //fix inconsistency in FAT
     if (size_in_clusters != 0 && size_in_dirent < size_in_clusters - 512 ) { 
         is_inconsist = 1;
@@ -124,6 +120,7 @@ int fix_in(struct direntry* dirent, char* filename, uint8_t *image_buf,
 	printf("Size according to FAT chain: %d\n",size_in_clusters);
         free_cluster(dirent, image_buf, bpb, size_in_dirent);
     }
+
     //fix the size entry
     else if (size_in_dirent > size_in_clusters) { 
 	is_inconsist = 1;	
@@ -144,8 +141,8 @@ int fix_in(struct direntry* dirent, char* filename, uint8_t *image_buf,
 }
 
 uint32_t calc_size(uint16_t cluster, uint8_t *image_buf, struct bpb33 *bpb, Node **cluster_list)
-{
-    uint16_t cluster_size = CLUSTER_SIZE_bpb;
+{//calculate the size of cluster
+    uint16_t cluster_size = CLUSTER_SIZE_bpb; 
 
     uint32_t size = 0;
     cluster_add(cluster, cluster_list);
@@ -153,7 +150,7 @@ uint32_t calc_size(uint16_t cluster, uint8_t *image_buf, struct bpb33 *bpb, Node
     while (!is_end_of_file(cluster)) {   
         
         if (cluster == (FAT12_MASK & CLUST_BAD)) {
-            printf("Bad cluster: cluster number %d \n", cluster);
+            printf("Bad cluster found in number %d \n", cluster);
         }
 
         size += cluster_size;
@@ -168,14 +165,15 @@ uint32_t calc_size(uint16_t cluster, uint8_t *image_buf, struct bpb33 *bpb, Node
 int find_orphan_creatDir (uint8_t *image_buf, struct bpb33* bpb, Node *list) 
 {
     int orphan_located = 0;
-    int inconst = 0;
+    int inconst = 0; //to keep track of inconsitency for print_message
     uint16_t cluster;
     
-    uint16_t check_clust = (FAT12_MASK & CLUST_FIRST);
+    uint16_t check_clust = (FAT12_MASK & CLUST_FIRST); //get the cluster 2 in the data region
     struct direntry *dirent; 
-    
-    for ( ; check_clust < 2849; check_clust++) {
+    //2880-1-9-9-14+2 = 2849
+    for ( ; check_clust < 2849; check_clust++) { //for loop to prints all the orphan clusters
         if (!check_cluster(check_clust, list) && (get_fat_entry(check_clust, image_buf, bpb) != CLUST_FREE))  {
+	//cluster not in the referenced list but the fat entry does not indicate free
             printf("Orphan cluster located; cluster number %d \n", check_clust);
             inconst = 1;
             orphan_located = 1;
@@ -188,14 +186,14 @@ int find_orphan_creatDir (uint8_t *image_buf, struct bpb33* bpb, Node *list)
     
     while (orphan_located) {
         orphan_located = 0;
-        for ( ; clust  < 2849; clust++) {
+        for ( ; clust  < 2849; clust++) {//2880-1-9-9-14+2 = 2849
             if (!check_cluster(clust, list) && (get_fat_entry(clust, image_buf, bpb) != CLUST_FREE))  {
                 inconst = 1;
                 orphan_located = 1;
                 break;
             }
         } 
-        if (orphan_located) {
+        if (orphan_located) {//if orphan is located, create a directory entry in the root directory
             orphan_count++;
             cluster = 0; 
             dirent = (struct direntry*)cluster_to_addr(cluster, image_buf, bpb);
@@ -222,20 +220,20 @@ void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
 {
     Node* list = NULL;
     int is_inconsist = 0;
-    uint16_t cluster = 0;
+    uint16_t cluster = 0; //indicates root directory
     struct direntry *dirent = (struct direntry*)cluster_to_addr(cluster, image_buf, bpb);
     char buffer[MAXFILENAME];
     int i = 0;
     for ( ; i < bpb->bpbRootDirEnts; i++)
     {
         uint16_t followclust = get_dirent(dirent, buffer);
-        if (dirent->deAttributes == ATTR_NORMAL) {
+        if (dirent->deAttributes == ATTR_NORMAL) {//normal file
             if (fix_in(dirent, buffer, image_buf, bpb, &list)) {
                 is_inconsist = 1;
 		//printf("INCON1:%d\n", is_inconsist); for testing
             }
         }
-        cluster_add(followclust, &list);
+        cluster_add(followclust, &list);//adds to cluster list to keep track of visited ones
         if (is_valid_cluster(followclust, bpb)) {
             cluster_add(followclust, &list);
             if (follow_dir(followclust, 1, image_buf, bpb, &list)) {
@@ -249,11 +247,15 @@ void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
     if(find_orphan_creatDir(image_buf, bpb, list)){
     	is_inconsist=1;
     }
+
     print_message(is_inconsist);
     cluster_clear(list);
 }
 
-
+void usage(char *progname) {
+    fprintf(stderr, "usage: %s <imagename>\n", progname);
+    exit(1);
+}
 
 int main(int argc, char** argv) {
     uint8_t *image_buf;
@@ -270,15 +272,6 @@ int main(int argc, char** argv) {
     unmmap_file(image_buf, &fd);
     return 0;
 }
-
-
-
-
-
-
-
-
-
 
 //Linked list functions
 void cluster_add(uint16_t cluster, Node **file_list) {
@@ -478,8 +471,8 @@ int follow_dir(uint16_t cluster, int indent,
         for ( ; i < numDirEntries; i++) {
             cluster_add(cluster, cluster_list);
             uint16_t followclust = get_dirent(dirent, buffer);
-            if (fix_in(dirent, buffer, image_buf, bpb, cluster_list)) {
-                is_inconsist = 1;
+            if (fix_in(dirent, buffer, image_buf, bpb, cluster_list)) {//check if there's any inconsistency fixed 
+                is_inconsist = 1; //for print message 
             }
             if (followclust) {
                 if (follow_dir(followclust, indent+1, image_buf, bpb, cluster_list)) {
@@ -500,5 +493,3 @@ void print_message(int is_inconsist)
     else 
     {printf("There is no inconsistency in the image. It is a good image! \n");}
 }
-
-
