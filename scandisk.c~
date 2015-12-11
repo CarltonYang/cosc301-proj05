@@ -57,15 +57,15 @@ void print_message(int is_inconsist);
 void free_cluster(struct direntry *dirent, uint8_t *image_buf, struct bpb33 *bpb, int actual_size) {
     
     uint16_t cluster = getushort(dirent->deStartCluster);
-    uint16_t byte_count = 0;
+    uint16_t size = 0;
     uint16_t prev_cluster = cluster;
 
-    while (byte_count < actual_size) {
-        byte_count += CLUSTER_SIZE_bpb;
+    while (size < actual_size) {
+        size += CLUSTER_SIZE_bpb;
         prev_cluster = cluster;
         cluster = get_fat_entry(cluster, image_buf, bpb);
     }
-    if (byte_count != 0) {
+    if (size != 0) {
         set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
     }
     // mark the rest of clusters pointed by the FAT chain as free
@@ -143,6 +143,81 @@ int fix_in(struct direntry* dirent, char* filename, uint8_t *image_buf,
     return is_inconsist;
 }
 
+uint32_t calc_size(uint16_t cluster, uint8_t *image_buf, struct bpb33 *bpb, Node **cluster_list)
+{
+    uint16_t cluster_size = CLUSTER_SIZE_bpb;
+
+    uint32_t size = 0;
+    cluster_add(cluster, cluster_list);
+    
+    while (!is_end_of_file(cluster)) {   
+        
+        if (cluster == (FAT12_MASK & CLUST_BAD)) {
+            printf("Bad cluster: cluster number %d \n", cluster);
+        }
+
+        size += cluster_size;
+
+        cluster = get_fat_entry(cluster, image_buf, bpb);
+        cluster_add(cluster, cluster_list);
+    }
+
+    return size;
+}
+
+int find_orphan_creatDir (uint8_t *image_buf, struct bpb33* bpb, Node *list) 
+{
+    int orphan_located = 0;
+    int inconst = 0;
+    uint16_t cluster;
+    
+    uint16_t check_clust = (FAT12_MASK & CLUST_FIRST);
+    struct direntry *dirent; 
+    
+    for ( ; check_clust < 2849; check_clust++) {
+        if (!check_cluster(check_clust, list) && (get_fat_entry(check_clust, image_buf, bpb) != CLUST_FREE))  {
+            printf("Orphan cluster located; cluster number %d \n", check_clust);
+            inconst = 1;
+            orphan_located = 1;
+        }
+    } 
+    
+    int orphan_count = 0;
+    
+    uint16_t clust = (FAT12_MASK & CLUST_FIRST);
+    
+    while (orphan_located) {
+        orphan_located = 0;
+        for ( ; clust  < 2849; clust++) {
+            if (!check_cluster(clust, list) && (get_fat_entry(clust, image_buf, bpb) != CLUST_FREE))  {
+                inconst = 1;
+                orphan_located = 1;
+                break;
+            }
+        } 
+        if (orphan_located) {
+            orphan_count++;
+            cluster = 0; 
+            dirent = (struct direntry*)cluster_to_addr(cluster, image_buf, bpb);
+            char filename[13];
+            memset(filename, '\0', 13);
+            strcat(filename, "found");
+            char str[3];
+            memset(str, '\0', 3);
+            int orphan_count_copy = orphan_count;
+            sprintf(str, "%d", orphan_count_copy);
+            strcat(filename, str);
+            strcat(filename, ".dat");
+            int size_clus = calc_size(clust, image_buf, bpb, &list);
+            cluster_add(clust, &list);
+            create_dirent(dirent, filename, clust, size_clus, image_buf, bpb);
+            inconst = 1;
+        }
+         
+    }
+    return inconst;
+}
+
 void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
 {
     Node* list = NULL;
@@ -157,6 +232,7 @@ void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
         if (dirent->deAttributes == ATTR_NORMAL) {
             if (fix_in(dirent, buffer, image_buf, bpb, &list)) {
                 is_inconsist = 1;
+		//printf("INCON1:%d\n", is_inconsist); for testing
             }
         }
         cluster_add(followclust, &list);
@@ -164,11 +240,15 @@ void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
             cluster_add(followclust, &list);
             if (follow_dir(followclust, 1, image_buf, bpb, &list)) {
                 is_inconsist = 1;
+		//printf("INCON:%d\n", is_inconsist); for testing
             }
         }
         dirent++;
     }
 
+    if(find_orphan_creatDir(image_buf, bpb, list)){
+    	is_inconsist=1;
+    }
     print_message(is_inconsist);
     cluster_clear(list);
 }
@@ -186,7 +266,7 @@ int main(int argc, char** argv) {
     image_buf = mmap_file(argv[1], &fd);
     bpb = check_bootsector(image_buf);
     traverse_root(image_buf, bpb);
-    //free(bpb);
+    free(bpb);
     unmmap_file(image_buf, &fd);
     return 0;
 }
